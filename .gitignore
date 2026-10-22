@@ -1,0 +1,22 @@
+# Environment variables
+.env
+
+# Python virtual environment & cache
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Storage & vector index persistence
+storage/
+*.db
+!data/structured/schema.sql
+
+# Streamlit
+.streamlit/
+
+# OS specific
+.DS_Store
+Thumbs.db
