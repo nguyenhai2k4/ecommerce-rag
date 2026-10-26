@@ -33,10 +33,8 @@ class AppConfig:
 
     # Model Settings (Google Gemini / GenAI)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    llm_model: str = os.getenv("LLM_MODEL", "models/gemini-2.5-flash")
-    embedding_model: str = os.getenv(
-        "EMBEDDING_MODEL", "models/text-embedding-004"
-    )
+    llm_model: str = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2-preview")
     temperature: float = float(os.getenv("TEMPERATURE", "0.1"))
     agent_mode: str = os.getenv("AGENT_MODE", "function_calling")
 

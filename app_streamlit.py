@@ -6,7 +6,11 @@ from src.agent.document_agent import SpecializedDocumentAgent
 from src.engines.structured_engine import StructuredEngineManager
 from src.engines.unstructured_engine import UnstructuredEngineManager
 from src.vault.doc_loader import load_vault_documents
-from src.evaluation.eval_suite import EVAL_TEST_CASES, run_agent_benchmark
+from src.evaluation.eval_suite import (
+    SemanticEvaluationSuite,
+    SEMANTIC_BENCHMARK_CASES,
+    run_agent_benchmark,
+)
 from src.config import config
 
 
@@ -263,47 +267,136 @@ with tab_vault:
 
 
 # =============================================================================
-# TAB 3: Evaluation & Benchmarks
+# TAB 3: Advanced Semantic Evaluation & Benchmarks
 # =============================================================================
 with tab_eval:
-    st.markdown("### 🧪 Production Evaluation & Benchmark Suite")
+    st.markdown("### 🧪 Production-Grade Semantic Search Evaluation Suite")
     st.markdown(
-        "Evaluate the agent's performance across **Structured SQL**, **Unstructured RAG**, "
-        "and **Multi-Hop Cross-Domain Synthesis**."
+        "Evaluate the agent beyond naive substring matching. Measures **Retriever Semantic Robustness** "
+        "(Hit Rate@k, MRR, Paraphrase Penalties) and **Agent Synthesis Quality** "
+        "(Embedding Cosine Similarity, Concept Coverage vs. Lexical False Negatives)."
     )
 
-    if st.button("🚀 Run Live Benchmark Suite", type="primary"):
-        with st.spinner("Executing test cases..."):
-            results = run_agent_benchmark(st.session_state.agent)
+    eval_tab1, eval_tab2, eval_tab3 = st.tabs([
+        "🚀 Live Dual-Stage Benchmark",
+        "📋 Paraphrase Test Matrix",
+        "💡 Retrieval Pitfalls & Mitigations",
+    ])
 
-            total_cases = len(results)
-            passed_cases = sum(1 for r in results if r["passed"])
-            avg_latency = round(sum(r["latency"] for r in results) / total_cases, 2)
+    with eval_tab1:
+        st.markdown("#### Execute Dual-Stage Semantic Evaluation")
+        st.caption("Runs both Retriever-level robustness testing and Agent-level semantic synthesis scoring.")
 
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.metric("Pass Rate", f"{round(passed_cases/total_cases*100, 1)}%", f"{passed_cases}/{total_cases} Passed")
-            with col_b:
-                st.metric("Avg Latency", f"{avg_latency}s")
-            with col_c:
-                st.metric("Total Test Cases", total_cases)
+        if st.button("▶️ Run Full Semantic Benchmark", type="primary"):
+            with st.spinner("Running semantic retriever evaluations and agent synthesis across paraphrased queries..."):
+                suite = SemanticEvaluationSuite(agent=st.session_state.agent)
+                benchmark_data = suite.run_full_suite()
 
-            st.markdown("#### Test Case Breakdown")
-            for res in results:
-                status_icon = "✅ PASS" if res["passed"] else "❌ FAIL"
-                with st.expander(f"{status_icon} [{res['id']}] {res['category']} - {res['query'][:60]}..."):
-                    st.markdown(f"**Query:** {res['query']}")
-                    st.markdown(f"**Latency:** {res['latency']}s")
-                    st.markdown(f"**Keywords Hit:** {', '.join(res['matched_keywords'])}")
-                    st.markdown(f"**Response:**\n{res['response']}")
-    else:
-        st.info("Click the button above to run the automated benchmark suite against the agent.")
-        st.markdown("#### Standard Test Suite Matrix")
-        suite_df = pd.DataFrame([
-            {"ID": tc.id, "Category": tc.category, "Description": tc.description, "Key Targets": ", ".join(tc.expected_keywords)}
-            for tc in EVAL_TEST_CASES
-        ])
-        st.table(suite_df)
+                retriever_res = benchmark_data["retriever_benchmark"]
+                synthesis_res = benchmark_data["synthesis_benchmark"]
+
+                # Metrics Overview
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    canon_hit = sum(1 for r in retriever_res if r["canonical_hit"]) / len(retriever_res)
+                    st.metric("Canonical Hit Rate", f"{canon_hit*100:.1f}%")
+                with c2:
+                    para_hit = sum(1 for r in retriever_res if r["paraphrase_hit"]) / len(retriever_res)
+                    st.metric("Paraphrase Hit Rate", f"{para_hit*100:.1f}%")
+                with c3:
+                    avg_penalty = sum(r["paraphrase_penalty"] for r in retriever_res) / len(retriever_res)
+                    st.metric("Mean Paraphrase Penalty", f"{avg_penalty:+.4f}", help="Score drop when queries use slang/synonyms")
+                with c4:
+                    semantic_pass = sum(1 for r in synthesis_res if r["semantic_passed"]) / len(synthesis_res)
+                    st.metric("Semantic Cosine Pass", f"{semantic_pass*100:.1f}%")
+
+                st.divider()
+
+                # Stage 1: Retriever Level Robustness
+                st.markdown("#### 1️⃣ Stage 1: Dense Retriever Robustness (Hit Rate & Paraphrase Penalty)")
+                retriever_df = pd.DataFrame([
+                    {
+                        "Case ID": r["id"],
+                        "Target Concept": r["concept_name"],
+                        "Canonical Hit": "✅ Yes (Rank " + str(r["canonical_rank"]) + ")" if r["canonical_hit"] else "❌ No",
+                        "Paraphrase Hit": "✅ Yes (Rank " + str(r["paraphrase_rank"]) + ")" if r["paraphrase_hit"] else "❌ No",
+                        "Canon Score": f"{r['canonical_score']:.4f}",
+                        "Para Score": f"{r['paraphrase_score']:.4f}",
+                        "Paraphrase Penalty (Δ)": f"{r['paraphrase_penalty']:+.4f}",
+                        "Verdict": r["robustness"],
+                    }
+                    for r in retriever_res
+                ])
+                st.dataframe(retriever_df, use_container_width=True)
+
+                st.divider()
+
+                # Stage 2: Agent Synthesis Level
+                st.markdown("#### 2️⃣ Stage 2: Agent Synthesis (Semantic Embedding Similarity vs. Naive Lexical)")
+                synthesis_df = pd.DataFrame([
+                    {
+                        "Case ID": s["id"],
+                        "Category": s["category"],
+                        "Naive Lexical Hit": f"{s['naive_score']*100:.0f}% ({'PASS' if s['naive_passed'] else 'FAIL'})",
+                        "Embedding Cosine Similarity": f"{s['cosine_score']:.3f} ({'PASS' if s['semantic_passed'] else 'FAIL'})",
+                        "Concept Coverage": f"{s['concept_coverage']*100:.0f}%",
+                        "Latency": f"{s['latency']}s",
+                        "Outcome": s["outcome"],
+                    }
+                    for s in synthesis_res
+                ])
+                st.dataframe(synthesis_df, use_container_width=True)
+
+                st.markdown("#### Detailed Case Inspection")
+                for s in synthesis_res:
+                    status_icon = "🟢" if s["semantic_passed"] else "🔴"
+                    with st.expander(f"{status_icon} [{s['id']}] {s['category']} | Cosine Similarity: {s['cosine_score']:.3f}"):
+                        st.markdown(f"**Query Evaluated (Paraphrased):** *\"{s['query']}\"*")
+                        st.markdown(f"**Golden Reference Answer:**\n> {s['reference_answer']}")
+                        st.markdown(f"**Agent Generated Response:**\n{s['response']}")
+                        st.markdown(f"**Concepts Captured:** {len(s['concepts_hit'])} propositions verified")
+        else:
+            st.info("Click 'Run Full Semantic Benchmark' above to evaluate retriever paraphrase penalties and agent embedding similarity.")
+
+    with eval_tab2:
+        st.markdown("#### Canonical vs. Paraphrased Test Pairs Matrix")
+        st.caption("Each test pair compares formal documentation phrasing against real-world colloquial slang and synonyms.")
+        matrix_data = [
+            {
+                "ID": tc.id,
+                "Concept": tc.concept_name,
+                "Canonical Phrasing": tc.canonical_query,
+                "Colloquial / Paraphrased Query": tc.paraphrased_query,
+                "Target Document": tc.target_doc_keyword,
+                "Key Semantic Concepts": "; ".join(tc.core_concepts),
+            }
+            for tc in SEMANTIC_BENCHMARK_CASES
+        ]
+        st.dataframe(pd.DataFrame(matrix_data), use_container_width=True)
+
+    with eval_tab3:
+        st.markdown("### 🧠 Semantic Retrieval Failure Modes & Production Mitigations")
+        st.markdown(
+            """
+            #### 1. Why Naive Exact / Keyword Matching Fails in Semantic Evaluation
+            - **Vocabulary Mismatch:** Users ask for *"premier loyalty patrons"* while documentation specifies *"VIP Tier Customers"*. A substring check for `"VIP"` produces a **False Negative** if the LLM adopts the user's synonym.
+            - **Lexical Overfitting:** Benchmarks relying on exact words mask weak embeddings because any keyword search (BM25) would retrieve them anyway.
+            
+            #### 2. The Conceptual Retrieval Penalty (Semantic Dispersion)
+            - Dense embeddings project queries into a shared vector space. When a query is colloquial, symptom-based, or long, its cosine similarity to the document chunk degrades (e.g., in our benchmark, **SEM-04 suffered a +0.1283 paraphrase penalty**).
+            
+            #### 3. Enterprise AI Engineering Solutions:
+            1. **Embedding Cosine Evaluation (`SemanticSimilarityEvaluator`):**
+               - Evaluates generated responses against a golden reference answer using vector cosine similarity. Invariance to rewordings, active vs passive voice, and synonyms.
+            2. **HyDE (Hypothetical Document Embeddings):**
+               - Uses an LLM to generate a hypothetical answer *first*, and embeds that hypothetical document. Aligns user query semantics with documentation format.
+               - Available in this repository via `unstructured_manager.get_hyde_query_engine()`.
+            3. **Hybrid Dense + Sparse Search (BM25 + Vector):**
+               - Preserves exact model code / SKU precision while retaining semantic synonym reach.
+            4. **Cross-Encoder Re-Ranking:**
+               - Re-ranks candidate chunks using full self-attention across `(query, document)` pairs, removing false-positive semantic drift.
+            """
+        )
 
 
 # =============================================================================
