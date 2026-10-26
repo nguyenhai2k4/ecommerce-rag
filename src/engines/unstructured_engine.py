@@ -58,13 +58,53 @@ class UnstructuredEngineManager:
         # Build fresh indices
         docs = load_vault_documents()
         splitter = SentenceSplitter(chunk_size=512, chunk_overlap=64)
-        nodes = splitter.get_nodes_from_documents(docs)
+        nodes = splitter.get_nodes_from_documents(docs) if docs else []
 
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.vector_index = VectorStoreIndex(nodes, embed_model=Settings.embed_model)
-        self.vector_index.storage_context.persist(persist_dir=str(self.storage_dir))
+        if nodes:
+            self.vector_index = VectorStoreIndex(nodes, embed_model=Settings.embed_model)
+            self.vector_index.storage_context.persist(persist_dir=str(self.storage_dir))
+            self.summary_index = SummaryIndex(nodes)
+        else:
+            self.vector_index = VectorStoreIndex([], embed_model=Settings.embed_model)
+            self.summary_index = SummaryIndex([])
 
-        self.summary_index = SummaryIndex(nodes)
+    def reindex(self, force: bool = True) -> None:
+        """Forces a clean re-indexing of all documents currently in the vault."""
+        self._initialize_indices(force_reindex=force)
+
+    def delete_document(self, file_name: str) -> bool:
+        """Deletes a document from the vault directory and refreshes indices."""
+        target_path = config.unstructured_dir / file_name
+        if target_path.exists():
+            target_path.unlink()
+            self.reindex(force=True)
+            return True
+        return False
+
+    def add_document(self, file_name: str, content: bytes) -> Path:
+        """Saves a new document into the vault and triggers index rebuild."""
+        config.unstructured_dir.mkdir(parents=True, exist_ok=True)
+        target_path = config.unstructured_dir / file_name
+        target_path.write_bytes(content)
+        self.reindex(force=True)
+        return target_path
+
+    def get_vault_file_list(self) -> List[dict]:
+        """Returns metadata for all physical files currently stored in the unstructured vault."""
+        files = []
+        for ext in ("*.md", "*.txt", "*.pdf"):
+            for p in config.unstructured_dir.glob(ext):
+                stat = p.stat()
+                files.append({
+                    "name": p.name,
+                    "extension": p.suffix.lower(),
+                    "size_bytes": stat.st_size,
+                    "size_kb": round(stat.st_size / 1024, 2),
+                    "modified_time": stat.st_mtime,
+                    "path": p,
+                })
+        return sorted(files, key=lambda x: x["name"])
 
     def get_vector_query_engine(self, similarity_top_k: int = 3):
         """Returns a query engine for semantic retrieval over policy and spec documents."""

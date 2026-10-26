@@ -1,4 +1,6 @@
 import time
+from pathlib import Path
+from datetime import datetime
 import pandas as pd
 import streamlit as st
 
@@ -12,6 +14,41 @@ from src.evaluation.eval_suite import (
     run_agent_benchmark,
 )
 from src.config import config
+
+
+def format_file_size(size_bytes: int) -> str:
+    """Formats file size into human-readable B, KB, or MB."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def get_mime_type(ext: str) -> str:
+    """Returns appropriate MIME type for downloads based on file extension."""
+    ext_lower = ext.lower().strip()
+    if ext_lower == ".md":
+        return "text/markdown"
+    elif ext_lower == ".txt":
+        return "text/plain"
+    elif ext_lower == ".pdf":
+        return "application/pdf"
+    return "application/octet-stream"
+
+
+def extract_pdf_preview(pdf_path: Path) -> str:
+    """Extracts text from a PDF file for UI preview."""
+    try:
+        from llama_index.core import SimpleDirectoryReader
+        docs = SimpleDirectoryReader(input_files=[str(pdf_path)]).load_data()
+        preview_parts = []
+        for i, d in enumerate(docs, 1):
+            preview_parts.append(f"--- Page {i} ---\n{d.text.strip()}")
+        return "\n\n".join(preview_parts) if preview_parts else "(No text extracted from PDF)"
+    except Exception as e:
+        return f"Error extracting PDF preview: {e}"
 
 
 # -----------------------------------------------------------------------------
@@ -241,29 +278,172 @@ with tab_chat:
 # =============================================================================
 # TAB 2: Knowledge Vault Explorer
 # =============================================================================
+# =============================================================================
+# TAB 2: Knowledge Vault & Document Management Studio
+# =============================================================================
 with tab_vault:
-    st.markdown("### 🗄️ External Data & Knowledge Vault Explorer")
-    st.markdown("Inspect both the underlying relational SQLite tables and the unstructured vectorized Markdown documents.")
+    st.markdown("### 🗄️ Knowledge Vault & Document Management Studio")
+    st.markdown(
+        "Manage unstructured knowledge documents (upload, preview, download, delete), "
+        "inspect live relational tables, and observe dynamic system prompts, schema, and reasoning relationships."
+    )
 
-    vault_sub1, vault_sub2 = st.tabs(["📊 Structured Tables (SQLite)", "📄 Unstructured Documents (Markdown)"])
+    vault_sub1, vault_sub2 = st.tabs([
+        "📄 Document Management (Upload, Preview, Download, Delete)",
+        "📊 Structured Database (SQLite)",
+    ])
 
+    # -------------------------------------------------------------------------
+    # SUBTAB 1: Document Manager
+    # -------------------------------------------------------------------------
     with vault_sub1:
-        tbl_choice = st.selectbox("Select SQLite Table to Inspect", ["products", "customers", "orders", "inventory_logs"])
-        rows = db_mgr.execute_raw_sql(f"SELECT * FROM {tbl_choice}")
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True)
-        st.caption(f"Displaying {len(df)} records from table `{tbl_choice}`.")
+        st.markdown("#### 📄 Document Vault Management")
+        st.caption("Upload company policies, SLAs, specifications, and customer sentiment reports (.md, .txt, .pdf).")
 
+        # Top Vault Metrics & Sync Action
+        vault_files = st.session_state.agent.unstructured_manager.get_vault_file_list()
+        total_size_bytes = sum(f["size_bytes"] for f in vault_files)
+        total_size_formatted = format_file_size(total_size_bytes)
+
+        m_col1, m_col2, m_col3, m_col4 = st.columns([2, 2, 3, 3])
+        with m_col1:
+            st.metric("Total Documents", len(vault_files))
+        with m_col2:
+            st.metric("Vault Storage", total_size_formatted)
+        with m_col3:
+            st.caption(f"📂 **Vault Path:** `{config.unstructured_dir}`")
+            st.caption("🏷️ **Supported Formats:** `.md`, `.txt`, `.pdf`")
+        with m_col4:
+            if st.button("🔄 Sync & Re-index Vault", use_container_width=True, help="Re-embed and rebuild all vector and summary indices"):
+                with st.spinner("Re-indexing knowledge vault documents and updating dynamic agent prompt..."):
+                    st.session_state.agent.reload_vault(force_reindex=True)
+                    st.success("Knowledge Vault re-indexed successfully!")
+                    time.sleep(0.5)
+                    st.rerun()
+
+        st.divider()
+
+        # Document Upload Section
+        st.markdown("##### 📤 Upload New Documents to Vault")
+        uploaded_files = st.file_uploader(
+            "Choose markdown, text, or PDF files to ingest",
+            type=["md", "txt", "pdf"],
+            accept_multiple_files=True,
+            help="Files will be automatically saved, parsed, chunked, and vectorized into the knowledge vault.",
+            key="vault_file_uploader",
+        )
+
+        if uploaded_files:
+            st.info(f"📁 {len(uploaded_files)} file(s) ready for ingestion.")
+            if st.button("🚀 Ingest & Index Uploaded Documents", type="primary"):
+                with st.spinner("Ingesting files, extracting content, and re-indexing vector store..."):
+                    for up_file in uploaded_files:
+                        content_bytes = up_file.read()
+                        st.session_state.agent.unstructured_manager.add_document(
+                            file_name=up_file.name,
+                            content=content_bytes,
+                        )
+                    st.session_state.agent.reload_vault(force_reindex=True)
+                    st.success(f"✅ Successfully ingested {len(uploaded_files)} document(s) and refreshed agent prompt!")
+                    time.sleep(0.7)
+                    st.rerun()
+
+        st.divider()
+
+        # Document Inventory & Management Workspace
+        st.markdown("##### 📚 Active Vault Documents")
+        if not vault_files:
+            st.warning("No documents currently found in the knowledge vault directory. Upload some documents above!")
+        else:
+            # Summary Table
+            docs_summary_data = []
+            for f in vault_files:
+                mod_str = datetime.fromtimestamp(f["modified_time"]).strftime("%Y-%m-%d %H:%M:%S")
+                docs_summary_data.append({
+                    "Document Name": f["name"],
+                    "Format": f["extension"].upper().replace(".", ""),
+                    "Size": format_file_size(f["size_bytes"]),
+                    "Last Modified": mod_str,
+                })
+            st.dataframe(pd.DataFrame(docs_summary_data), use_container_width=True)
+
+            # Selected Document Actions (Preview, Download, Delete)
+            doc_names = [f["name"] for f in vault_files]
+            selected_doc_name = st.selectbox("Select a Document to Preview, Download, or Delete", doc_names)
+
+            if selected_doc_name:
+                selected_meta = next(f for f in vault_files if f["name"] == selected_doc_name)
+                selected_path = selected_meta["path"]
+                ext = selected_meta["extension"]
+
+                # Action Bar
+                act_col1, act_col2 = st.columns([3, 3])
+                with act_col1:
+                    with open(selected_path, "rb") as bf:
+                        file_bytes = bf.read()
+                    mime_type = get_mime_type(ext)
+                    st.download_button(
+                        label=f"📥 Download `{selected_doc_name}`",
+                        data=file_bytes,
+                        file_name=selected_doc_name,
+                        mime=mime_type,
+                        use_container_width=True,
+                    )
+                with act_col2:
+                    with st.popover(f"🗑️ Delete `{selected_doc_name}`", use_container_width=True):
+                        st.warning(f"Are you sure you want to delete `{selected_doc_name}`?")
+                        st.caption("This will permanently remove the file from disk and re-index the knowledge vault vector store.")
+                        if st.button("⚠️ Confirm Delete", key=f"confirm_delete_{selected_doc_name}", type="primary"):
+                            st.session_state.agent.unstructured_manager.delete_document(selected_doc_name)
+                            st.session_state.agent.reload_vault(force_reindex=True)
+                            st.success(f"Deleted `{selected_doc_name}` and rebuilt knowledge vault!")
+                            time.sleep(0.6)
+                            st.rerun()
+
+                # Document Content Preview
+                st.markdown("###### 👁️ Document Content Preview")
+                if ext == ".md":
+                    view_mode = st.radio("View Format", ["Rendered Markdown", "Raw Source Code"], horizontal=True, key=f"view_{selected_doc_name}")
+                    try:
+                        with open(selected_path, "r", encoding="utf-8") as rf:
+                            md_text = rf.read()
+                        if view_mode == "Rendered Markdown":
+                            st.markdown(md_text)
+                        else:
+                            st.code(md_text, language="markdown")
+                    except Exception as e:
+                        st.error(f"Error reading markdown file: {e}")
+
+                elif ext == ".txt":
+                    try:
+                        with open(selected_path, "r", encoding="utf-8") as rf:
+                            txt_content = rf.read()
+                        st.code(txt_content, language="text")
+                    except Exception as e:
+                        st.error(f"Error reading text file: {e}")
+
+                elif ext == ".pdf":
+                    st.caption("📕 PDF Document Text Extraction Preview:")
+                    pdf_text = extract_pdf_preview(selected_path)
+                    st.text_area("Extracted PDF Content", pdf_text, height=400)
+
+    # -------------------------------------------------------------------------
+    # SUBTAB 2: Structured Tables (SQLite)
+    # -------------------------------------------------------------------------
     with vault_sub2:
-        doc_files = list(config.unstructured_dir.glob("*.md"))
-        doc_names = [f.name for f in doc_files]
-        chosen_file = st.selectbox("Select Document from Vault", doc_names)
+        st.markdown("#### 📊 Relational Database Tables (SQLite)")
+        st.caption("Direct read-only inspection of structured retail database records.")
 
-        if chosen_file:
-            file_path = config.unstructured_dir / chosen_file
-            with open(file_path, "r", encoding="utf-8") as f:
-                doc_content = f.read()
-            st.markdown(doc_content)
+        table_names = db_mgr.get_table_names()
+        tbl_choice = st.selectbox("Select SQLite Table to Inspect", table_names)
+
+        if tbl_choice:
+            rows = db_mgr.execute_raw_sql(f"SELECT * FROM {tbl_choice}")
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True)
+            st.caption(f"Displaying {len(df)} records from table `{tbl_choice}`.")
+
+
 
 
 # =============================================================================

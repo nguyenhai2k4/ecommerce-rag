@@ -48,9 +48,60 @@ def test_agent_initialization():
     assert len(res.response_text) > 0
 
 
+def test_dynamic_prompt_and_schema():
+    """Verify dynamic schema extraction, foreign key discovery, and dynamic system prompt generation."""
+    from src.agent.prompts import (
+        extract_database_schema_and_fks,
+        extract_vault_manifest,
+        build_dynamic_system_prompt,
+    )
+
+    db_info = extract_database_schema_and_fks()
+    assert "products" in db_info["table_names"]
+    assert "orders" in db_info["table_names"]
+    assert len(db_info["fk_relationships"]) >= 3
+    assert any("orders.customer_id joins with customers.customer_id" in rel for rel in db_info["fk_relationships"])
+
+    vault_info = extract_vault_manifest()
+    assert len(vault_info["entries"]) >= 4
+
+    agent = SpecializedDocumentAgent(verbose=False)
+    assert "Live Database Schema" in agent.system_prompt
+    assert "orders.customer_id joins with customers.customer_id" in agent.system_prompt
+    assert "retail_sql_analytics" in agent.system_prompt
+    assert "knowledge_vault_semantic_search" in agent.system_prompt
+
+
+def test_document_management_operations():
+    """Verify adding, previewing, and deleting documents with auto-reindexing."""
+    mgr = UnstructuredEngineManager()
+    test_filename = "_temp_smoke_test_policy.md"
+    test_content = b"# Temporary Smoke Test Policy\nThis document verifies dynamic upload, indexing, and deletion."
+
+    # 1. Add document
+    file_path = mgr.add_document(test_filename, test_content)
+    assert file_path.exists()
+
+    vault_files = mgr.get_vault_file_list()
+    assert any(f["name"] == test_filename for f in vault_files)
+
+    # 2. Verify agent reload picks it up
+    agent = SpecializedDocumentAgent(verbose=False)
+    agent.reload_vault(force_reindex=False)
+    assert test_filename in agent.system_prompt or "Temporary Smoke Test Policy" in agent.system_prompt
+
+    # 3. Delete document
+    deleted = mgr.delete_document(test_filename)
+    assert deleted is True
+    assert not file_path.exists()
+    assert not any(f["name"] == test_filename for f in mgr.get_vault_file_list())
+
+
 if __name__ == "__main__":
     test_vault_and_database()
     test_document_loader()
     test_date_calculator_tool()
+    test_dynamic_prompt_and_schema()
+    test_document_management_operations()
     test_agent_initialization()
     print("All system integration tests passed successfully!")

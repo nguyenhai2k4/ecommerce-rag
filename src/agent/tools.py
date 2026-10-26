@@ -34,27 +34,34 @@ def build_document_agent_tools(
     Constructs the tool suite for the Specialized Document Agent.
     """
     # 1. SQL Query Tool
+    tables = structured_manager.get_table_names()
+    tables_str = ", ".join(tables) if tables else "products, customers, orders, inventory_logs"
     sql_engine = structured_manager.get_query_engine(llm=llm)
     sql_tool = QueryEngineTool.from_defaults(
         query_engine=sql_engine,
         name="retail_sql_analytics",
         description=(
             "Translates natural language questions into SQL to query structured data from the retail database. "
-            "Use this tool whenever you need exact counts, metrics, orders, delivery dates, prices, customer loyalty tiers, "
-            "stock quantities, or inventory logs. Tables: products, customers, orders, inventory_logs."
+            f"Use this tool whenever you need exact counts, metrics, orders, delivery dates, prices, customer loyalty tiers, "
+            f"stock quantities, or inventory logs. Dynamically available tables: {tables_str}."
         ),
     )
 
     # 2. Vector Semantic Search Tool
+    from src.vault.doc_loader import load_vault_documents
+    active_docs = load_vault_documents()
+    unique_titles = list({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
+    docs_str = "; ".join(unique_titles) if unique_titles else "corporate policy, SLA, specification, and sentiment documents"
+
     vector_engine = unstructured_manager.get_vector_query_engine(similarity_top_k=3)
     vector_tool = QueryEngineTool.from_defaults(
         query_engine=vector_engine,
         name="knowledge_vault_semantic_search",
         description=(
             "Performs semantic search across the unstructured knowledge vault. "
-            "Contains: return & refund policy windows (Standard 30d, Gold 45d, VIP 60d, hygiene rules for in-ear audio), "
-            "shipping & delivery SLAs, product technical specifications (battery, reset procedures, codecs), "
-            "and Q3 customer review sentiment and feedback."
+            f"Active indexed documents: {docs_str}. "
+            "Covers return & refund policies, tier windows (Standard 30d, Gold 45d, VIP 60d), shipping SLAs, "
+            "product technical specifications, and customer review sentiment."
         ),
     )
 
