@@ -5,13 +5,13 @@
 [![Google Gemini](https://img.shields.io/badge/LLM-Gemini%202.5%20Flash-orange.svg)](https://aistudio.google.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Enterprise-grade Document & Data Intelligence Agent** built with **LlamaIndex** that queries, retrieves, and synthesizes across both **structured relational databases** (SQLite Text-to-SQL) and **unstructured knowledge vaults** (Markdown/PDF policy documents, SLAs, and technical specifications).
+> **Document & Data Intelligence Agent** built with **LlamaIndex** that queries, retrieves, and synthesizes across both **structured relational databases** (SQLite Text-to-SQL) and **unstructured knowledge vaults** (Markdown/PDF policy documents, SLAs, and technical specifications).
 
 ---
 
 ## 🌟 Why This Project Stands Out (AI Engineering Portfolio Highlights)
 
-Most baseline RAG projects only search unstructured text chunks via naive vector similarity. In real enterprise environments, business intelligence requires **hybrid, multi-hop reasoning** across both structured transactional records (e.g., customer tiers, order delivery dates, stock levels) and unstructured guidelines (e.g., return policies, warranty terms, hardware specs, customer reviews).
+Most baseline RAG projects only search unstructured text chunks via naive vector similarity. In real production environments, business intelligence requires **hybrid, multi-hop reasoning** across both structured transactional records (e.g., customer tiers, order delivery dates, stock levels) and unstructured guidelines (e.g., return policies, warranty terms, hardware specs, customer reviews).
 
 ### Key Architectural Capabilities:
 1. **Multi-Hop Cross-Domain Reasoning:** The agent autonomously connects facts across relational SQL databases and vector document stores. (e.g., retrieving customer tier and delivery date from SQL, looking up tier-specific return windows in a policy document, and computing refund eligibility).
