@@ -8,18 +8,26 @@ from src.config import config
 from src.vault.doc_loader import load_vault_documents
 
 
-def format_tools_manifest(tools: Optional[List[Any]] = None) -> str:
-    """Dynamically formats tool names and descriptions directly from active tool instances."""
+def format_tools_manifest(
+    tools: Optional[List[Any]] = None,
+    structured_manager: Optional[Any] = None,
+) -> str:
+    """Dynamically formats tool names and descriptions from active tool instances or lightweight metadata."""
     if not tools:
-        # Dynamically build tools to extract real definitions instead of hardcoding
         try:
-            from src.agent.tools import build_document_agent_tools
             from src.engines.structured_engine import StructuredEngineManager
-            from src.engines.unstructured_engine import UnstructuredEngineManager
-            tools = build_document_agent_tools(
-                structured_manager=StructuredEngineManager(),
-                unstructured_manager=UnstructuredEngineManager(),
-            )
+            mgr = structured_manager or StructuredEngineManager()
+            tables = mgr.get_table_names()
+            tables_str = ", ".join(tables) if tables else "products, customers, orders, inventory_logs"
+            active_docs = load_vault_documents()
+            unique_titles = sorted({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
+            docs_str = "; ".join(unique_titles) if unique_titles else "corporate policy, SLA, specification, and sentiment documents"
+            return "\n".join([
+                f"1. `retail_sql_analytics`: Translates natural language questions into SQL to query structured data from the retail database. Dynamically available tables: {tables_str}.",
+                f"2. `knowledge_vault_semantic_search`: Performs semantic search across the unstructured knowledge vault. Active indexed documents: {docs_str}.",
+                "3. `document_summary_tool`: Synthesizes high-level overviews across full documents.",
+                "4. `date_calculator`: Calculates exact calendar days between two YYYY-MM-DD dates.",
+            ])
         except Exception:
             return "- Tools dynamically configured at agent initialization."
 
@@ -178,7 +186,7 @@ def build_dynamic_system_prompt(
     Constructs an enterprise-grade, dynamic system prompt for the Specialized Document Agent.
     Adapts on-the-fly to registered tools, database schema, foreign keys, and uploaded vault documents.
     """
-    tools_str = format_tools_manifest(tools)
+    tools_str = format_tools_manifest(tools, structured_manager=structured_manager)
     db_info = extract_database_schema(structured_manager)
     vault_info = extract_vault_manifest(unstructured_manager)
 

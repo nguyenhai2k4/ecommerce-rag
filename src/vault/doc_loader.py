@@ -1,7 +1,25 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 from llama_index.core import SimpleDirectoryReader, Document
 from src.config import config
+
+# In-memory cache keyed by directory path -> (dir_signature, List[Document])
+_VAULT_DOCS_CACHE: Dict[str, Tuple[Tuple[Tuple[str, int, int], ...], List[Document]]] = {}
+
+
+def _compute_dir_signature(target_dir: Path) -> Tuple[Tuple[str, int, int], ...]:
+    """Computes a lightweight fingerprint of all supported files in the directory."""
+    entries = []
+    if target_dir.exists():
+        for ext in ("*.md", "*.txt", "*.pdf"):
+            for p in target_dir.rglob(ext):
+                try:
+                    st = p.stat()
+                    entries.append((str(p.resolve()), st.st_mtime_ns, st.st_size))
+                except OSError:
+                    continue
+    entries.sort(key=lambda x: x[0])
+    return tuple(entries)
 
 
 def _infer_document_title(doc: Document, file_name: str) -> str:
@@ -36,13 +54,25 @@ def _infer_doc_type_and_domain(file_name: str, title: str, text: str) -> tuple[s
         return "general_knowledge", "operations"
 
 
-def load_vault_documents(docs_dir: Optional[Path] = None) -> List[Document]:
+def load_vault_documents(docs_dir: Optional[Path] = None, force_reload: bool = False) -> List[Document]:
     """
     Loads all markdown/text/pdf documents from the unstructured knowledge vault.
     Enriches each Document with structured metadata for filtering and citation tracking.
+    Caches loaded documents in memory and invalidates automatically when files change.
     """
-    target_dir = docs_dir or config.unstructured_dir
+    target_dir = (docs_dir or config.unstructured_dir).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    dir_key = str(target_dir)
+    current_sig = _compute_dir_signature(target_dir)
+    if not current_sig:
+        _VAULT_DOCS_CACHE[dir_key] = (current_sig, [])
+        return []
+
+    if not force_reload and dir_key in _VAULT_DOCS_CACHE:
+        cached_sig, cached_docs = _VAULT_DOCS_CACHE[dir_key]
+        if cached_sig == current_sig:
+            return list(cached_docs)
 
     reader = SimpleDirectoryReader(
         input_dir=str(target_dir),
@@ -80,7 +110,8 @@ def load_vault_documents(docs_dir: Optional[Path] = None) -> List[Document]:
             doc.metadata["domain"] = domain
             doc.metadata["title"] = inferred_title
 
-    return documents
+    _VAULT_DOCS_CACHE[dir_key] = (current_sig, documents)
+    return list(documents)
 
 
 if __name__ == "__main__":

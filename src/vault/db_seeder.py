@@ -1,7 +1,9 @@
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
 from src.config import config
+
+_VERIFIED_DB_PATHS: Set[str] = set()
 
 
 def get_database_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -18,10 +20,15 @@ def seed_database(db_path: Optional[Path] = None, force: bool = False) -> Path:
     Initializes and seeds the SQLite retail database.
     If the database already exists and has records, seeding is skipped unless force=True.
     """
-    target_path = db_path or config.db_path
+    target_path = (db_path or config.db_path).resolve()
+    target_key = str(target_path)
+
+    if not force and target_key in _VERIFIED_DB_PATHS and target_path.exists() and target_path.stat().st_size > 0:
+        return target_path
+
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(target_path))
+    conn = sqlite3.connect(target_key)
     cursor = conn.cursor()
 
     # Check if tables already exist
@@ -33,6 +40,7 @@ def seed_database(db_path: Optional[Path] = None, force: bool = False) -> Path:
         count = cursor.fetchone()[0]
         if count > 0:
             conn.close()
+            _VERIFIED_DB_PATHS.add(target_key)
             return target_path
 
     # Read and apply schema
@@ -103,6 +111,7 @@ def seed_database(db_path: Optional[Path] = None, force: bool = False) -> Path:
 
     conn.commit()
     conn.close()
+    _VERIFIED_DB_PATHS.add(target_key)
     return target_path
 
 

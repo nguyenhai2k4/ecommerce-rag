@@ -1,11 +1,11 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Union
 from llama_index.core.tools import QueryEngineTool, FunctionTool, BaseTool
 from src.engines.structured_engine import StructuredEngineManager
 from src.engines.unstructured_engine import UnstructuredEngineManager
 
 
-def calculate_days_between_dates(date_start: str, date_end: str = "2026-10-22") -> int:
+def calculate_days_between_dates(date_start: str, date_end: str = "2026-10-22") -> Union[int, str]:
     """
     Calculates the exact number of calendar days between two dates formatted as YYYY-MM-DD.
     Useful for verifying return window eligibility and shipping delivery SLAs.
@@ -15,7 +15,7 @@ def calculate_days_between_dates(date_start: str, date_end: str = "2026-10-22") 
         date_end: End date in 'YYYY-MM-DD' format (defaults to current date '2026-10-22').
 
     Returns:
-        The integer number of calendar days elapsed.
+        The integer number of calendar days elapsed, or an error string if parsing fails.
     """
     try:
         d1 = datetime.strptime(date_start.strip(), "%Y-%m-%d")
@@ -50,10 +50,10 @@ def build_document_agent_tools(
     # 2. Vector Semantic Search Tool
     from src.vault.doc_loader import load_vault_documents
     active_docs = load_vault_documents()
-    unique_titles = list({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
+    unique_titles = sorted({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
     docs_str = "; ".join(unique_titles) if unique_titles else "corporate policy, SLA, specification, and sentiment documents"
 
-    vector_engine = unstructured_manager.get_vector_query_engine(similarity_top_k=3)
+    vector_engine = unstructured_manager.get_vector_query_engine(similarity_top_k=3, llm=llm)
     vector_tool = QueryEngineTool.from_defaults(
         query_engine=vector_engine,
         name="knowledge_vault_semantic_search",
@@ -66,7 +66,7 @@ def build_document_agent_tools(
     )
 
     # 3. Document Summary Tool
-    summary_engine = unstructured_manager.get_summary_query_engine()
+    summary_engine = unstructured_manager.get_summary_query_engine(llm=llm)
     summary_tool = QueryEngineTool.from_defaults(
         query_engine=summary_engine,
         name="document_summary_tool",

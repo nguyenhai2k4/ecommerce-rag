@@ -19,7 +19,8 @@ Most baseline RAG projects only search unstructured text chunks via naive vector
 3. **Dual Unstructured Retrievability:** Provides both pinpoint semantic vector retrieval (`VectorStoreIndex` with `text-embedding-004`) and holistic multi-document summarization (`SummaryIndex`).
 4. **Deterministic Arithmetic Augmentation:** Employs a custom `date_calculator` tool to eliminate LLM arithmetic hallucinations when evaluating elapsed calendar days.
 5. **Production Interfaces:** Ships with both a glassmorphic **Streamlit Web Application** (live trace inspection & knowledge vault explorer) and a rich terminal **Interactive CLI**.
-6. **Built-in Benchmark Suite:** Automated evaluation suite measuring retrieval accuracy, latency, and grounded keyword coverage.
+6. **Persistent Multi-Session Chat History & Management:** Full conversation lifecycle management with an interactive chat history panel, one-click "New Chat" provisioning, smart auto-titling from user prompts, agent context synchronization across sessions, renaming, session deletion, and one-click Markdown transcript export.
+7. **Built-in Benchmark Suite:** Automated evaluation suite measuring retrieval accuracy, latency, and grounded keyword coverage.
 
 ---
 
@@ -110,7 +111,7 @@ cp .env.example .env
 Add your Google Gemini API key:
 ```ini
 GEMINI_API_KEY=AIzaSyYourActualKeyHere
-LLM_MODEL=models/gemini-2.5-flash
+LLM_MODEL=models/gemini-2.5-flash-lite
 EMBEDDING_MODEL=models/text-embedding-004
 ```
 
@@ -244,7 +245,7 @@ LlamaIndex-rag-document-agent/
 ## 🛠️ Technology Stack
 
 - **Agentic Framework:** [LlamaIndex Core v0.14+](https://developers.llamaindex.ai/) (`AgentWorkflow`, `QueryEngineTool`, `FunctionTool`)
-- **LLM & Embeddings:** Google Gemini (`gemini-2.5-flash` / `gemini-1.5-pro` via `llama-index-llms-google-genai`, `text-embedding-004` via `llama-index-embeddings-google-genai`)
+- **LLM & Embeddings:** Google Gemini (`gemini-2.5-flash-lite` / `gemini-1.5-pro` via `llama-index-llms-google-genai`, `text-embedding-004` via `llama-index-embeddings-google-genai`)
 - **Structured Retrieval:** SQLAlchemy & SQLite (`NLSQLTableQueryEngine`)
 - **Unstructured Retrieval:** LlamaIndex `VectorStoreIndex` + `SummaryIndex`
 - **User Interfaces:** [Streamlit](https://streamlit.io/) (Web UI) & [Rich](https://rich.readthedocs.io/) (Terminal CLI)

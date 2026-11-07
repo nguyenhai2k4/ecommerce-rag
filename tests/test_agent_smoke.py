@@ -8,6 +8,7 @@ from src.vault.doc_loader import load_vault_documents
 from src.engines.structured_engine import StructuredEngineManager
 from src.engines.unstructured_engine import UnstructuredEngineManager
 from src.agent.document_agent import SpecializedDocumentAgent
+from src.agent.chat_history import ChatHistoryManager, auto_generate_title
 from src.agent.tools import calculate_days_between_dates
 
 
@@ -97,11 +98,84 @@ def test_document_management_operations():
     assert not any(f["name"] == test_filename for f in mgr.get_vault_file_list())
 
 
+def test_chat_history_and_session_lifecycle():
+    """Verify chat session persistence, auto-titling, markdown export, and memory syncing."""
+    history_mgr = ChatHistoryManager()
+    
+    # 1. Title Auto-Generation
+    title1 = auto_generate_title("Can you please check if Alice Chen can return order #5001?")
+    assert "Alice" in title1
+    assert "return" in title1.lower()
+
+    # 2. Create Session
+    session = history_mgr.create_session("Initial Title")
+    session_id = session["id"]
+    assert session_id.startswith("chat_")
+    assert len(session["messages"]) == 1
+    assert session["messages"][0]["role"] == "assistant"
+
+    # 3. List Sessions & Initialization Filtering
+    sessions = history_mgr.list_sessions(require_user_messages=False)
+    assert any(s["id"] == session_id for s in sessions)
+    # Since session only has assistant greeting, it is not yet initialized with user messages
+    uninitialized_sessions = history_mgr.list_sessions(require_user_messages=True)
+    assert not any(s["id"] == session_id for s in uninitialized_sessions)
+
+    # 4. Save and Update Conversation with auto-titling (now initialized)
+    updated_messages = [
+        {"role": "assistant", "content": "Welcome greeting"},
+        {"role": "user", "content": "How do I factory reset AeroSound headphones?"},
+        {"role": "assistant", "content": "Hold the power button for 10 seconds.", "sources": ["SPEC-TECH-2026-A1"], "latency": 1.2},
+    ]
+    saved = history_mgr.save_session(
+        session_id=session_id,
+        title="New Conversation",  # Should trigger auto-titling from user query
+        messages=updated_messages,
+    )
+    assert "AeroSound" in saved["title"] or "reset" in saved["title"].lower()
+    assert len(saved["messages"]) == 3
+    # Now it must appear in initialized sessions
+    initialized_sessions = history_mgr.list_sessions(require_user_messages=True)
+    assert any(s["id"] == session_id for s in initialized_sessions)
+
+    # 5. Agent Memory Loading & Resetting
+    agent = SpecializedDocumentAgent(verbose=False)
+    agent.load_conversation(updated_messages)
+    assert len(agent.chat_history) == 3
+    assert agent.chat_history[1].content == "How do I factory reset AeroSound headphones?"
+    agent.reset_conversation()
+    assert len(agent.chat_history) == 0
+
+    # 6. Export Session Markdown
+    md_export = history_mgr.export_session_markdown(session_id)
+    assert "AeroSound" in md_export
+    assert "SPEC-TECH-2026-A1" in md_export
+
+    # 7. Rename Session
+    renamed = history_mgr.rename_session(session_id, "Custom Handcrafted Title")
+    assert renamed is True
+    loaded_renamed = history_mgr.get_session(session_id)
+    assert loaded_renamed["title"] == "Custom Handcrafted Title"
+
+    # 8. Delete Session
+    deleted = history_mgr.delete_session(session_id)
+    assert deleted is True
+    assert history_mgr.get_session(session_id) is None
+
+    # 9. Cleanup uninitialized sessions
+    ghost_sess = history_mgr.create_session("Ghost Session")
+    assert history_mgr.get_session(ghost_sess["id"]) is not None
+    cleaned_count = history_mgr.cleanup_uninitialized_sessions()
+    assert cleaned_count >= 1
+    assert history_mgr.get_session(ghost_sess["id"]) is None
+
+
 if __name__ == "__main__":
     test_vault_and_database()
     test_document_loader()
     test_date_calculator_tool()
     test_dynamic_prompt_and_schema()
     test_document_management_operations()
+    test_chat_history_and_session_lifecycle()
     test_agent_initialization()
     print("All system integration tests passed successfully!")

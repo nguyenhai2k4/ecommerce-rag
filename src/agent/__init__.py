@@ -8,6 +8,7 @@ from src.agent.document_agent import (
 )
 from src.agent.prompts import DOCUMENT_AGENT_SYSTEM_PROMPT
 from src.agent.tools import build_document_agent_tools
+from src.agent.chat_history import ChatHistoryManager, auto_generate_title
 
 __all__ = [
     "SpecializedDocumentAgent",
@@ -15,4 +16,6 @@ __all__ = [
     "AgentTraceStep",
     "DOCUMENT_AGENT_SYSTEM_PROMPT",
     "build_document_agent_tools",
+    "ChatHistoryManager",
+    "auto_generate_title",
 ]
