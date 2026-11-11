@@ -1,14 +1,14 @@
 """
 Specialized Document Agent Package
 """
+from typing import Any
+from src.agent.chat_history import ChatHistoryManager, auto_generate_title
 from src.agent.document_agent import (
-    SpecializedDocumentAgent,
     AgentResponse,
     AgentTraceStep,
+    SpecializedDocumentAgent,
 )
-from src.agent.prompts import DOCUMENT_AGENT_SYSTEM_PROMPT
 from src.agent.tools import build_document_agent_tools
-from src.agent.chat_history import ChatHistoryManager, auto_generate_title
 
 __all__ = [
     "SpecializedDocumentAgent",
@@ -19,3 +19,10 @@ __all__ = [
     "ChatHistoryManager",
     "auto_generate_title",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "DOCUMENT_AGENT_SYSTEM_PROMPT":
+        from src.agent import prompts
+        return getattr(prompts, "DOCUMENT_AGENT_SYSTEM_PROMPT")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

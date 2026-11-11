@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import List, Optional, Union
-from llama_index.core.tools import QueryEngineTool, FunctionTool, BaseTool
+from typing import List, Union
+from llama_index.core.tools import BaseTool, FunctionTool, QueryEngineTool
 from src.engines.structured_engine import StructuredEngineManager
 from src.engines.unstructured_engine import UnstructuredEngineManager
+from src.vault.doc_loader import get_vault_manifest_entries
 
 
 def calculate_days_between_dates(date_start: str, date_end: str = "2026-10-22") -> Union[int, str]:
@@ -48,9 +49,8 @@ def build_document_agent_tools(
     )
 
     # 2. Vector Semantic Search Tool
-    from src.vault.doc_loader import load_vault_documents
-    active_docs = load_vault_documents()
-    unique_titles = sorted({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
+    manifest_entries = get_vault_manifest_entries()
+    unique_titles = sorted({e.get("title", e.get("file_name", "Doc")) for e in manifest_entries})
     docs_str = "; ".join(unique_titles) if unique_titles else "corporate policy, SLA, specification, and sentiment documents"
 
     vector_engine = unstructured_manager.get_vector_query_engine(similarity_top_k=3, llm=llm)

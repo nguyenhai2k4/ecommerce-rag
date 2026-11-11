@@ -3,9 +3,8 @@ Dynamic System Prompts and Reasoning Templates for the Specialized Document Agen
 Introspects database schema, foreign keys, tool definitions, and knowledge vault documents on-the-fly.
 Zero hardcoded schemas, tools, documents, or domain rules.
 """
-from typing import List, Dict, Any, Optional
-from src.config import config
-from src.vault.doc_loader import load_vault_documents
+from typing import Any, Dict, List, Optional
+from src.vault.doc_loader import get_vault_manifest_entries
 
 
 def format_tools_manifest(
@@ -19,8 +18,8 @@ def format_tools_manifest(
             mgr = structured_manager or StructuredEngineManager()
             tables = mgr.get_table_names()
             tables_str = ", ".join(tables) if tables else "products, customers, orders, inventory_logs"
-            active_docs = load_vault_documents()
-            unique_titles = sorted({d.metadata.get("title", d.metadata.get("file_name", "Doc")) for d in active_docs})
+            manifest_entries = get_vault_manifest_entries()
+            unique_titles = sorted({e.get("title", e.get("file_name", "Doc")) for e in manifest_entries})
             docs_str = "; ".join(unique_titles) if unique_titles else "corporate policy, SLA, specification, and sentiment documents"
             return "\n".join([
                 f"1. `retail_sql_analytics`: Translates natural language questions into SQL to query structured data from the retail database. Dynamically available tables: {tables_str}.",
@@ -79,27 +78,11 @@ extract_database_schema_and_fks = extract_database_schema
 def extract_vault_manifest(unstructured_manager: Optional[Any] = None) -> Dict[str, Any]:
     """Dynamically extracts all documents currently available in the unstructured vault."""
     try:
-        docs = load_vault_documents()
-        seen = set()
-        manifest_entries = []
-        manifest_lines = []
-
-        for d in docs:
-            fn = d.metadata.get("file_name", "unknown")
-            if fn in seen:
-                continue
-            seen.add(fn)
-            title = d.metadata.get("title", fn)
-            doc_type = d.metadata.get("doc_type", "document")
-            domain = d.metadata.get("domain", "general")
-            manifest_entries.append({
-                "file_name": fn,
-                "title": title,
-                "doc_type": doc_type,
-                "domain": domain,
-            })
-            manifest_lines.append(f"- **{title}** (`{fn}` | Type: `{doc_type}` | Domain: `{domain}`)")
-
+        manifest_entries = get_vault_manifest_entries()
+        manifest_lines = [
+            f"- **{e['title']}** (`{e['file_name']}` | Type: `{e['doc_type']}` | Domain: `{e['domain']}`)"
+            for e in manifest_entries
+        ]
         formatted_manifest = "\n".join(manifest_lines) if manifest_lines else "- No documents currently uploaded in vault."
         return {
             "entries": manifest_entries,
@@ -139,22 +122,22 @@ def build_cross_domain_relationships(
             doc_type = entry["doc_type"]
 
             # Correlate document domain with database tables dynamically
-            if any(k in fn or k in domain for k in ["return", "refund", "warranty", "policy"]):
+            if any(k in fn or k in domain for k in ("return", "refund", "warranty", "policy")):
                 lines.append(
                     f"- **{title}** (`{entry['file_name']}`) ⟷ Correlate with order and customer records: "
                     "retrieve return/refund criteria and warranty eligibility windows from this document to evaluate against order dates, statuses, and customer tiers."
                 )
-            elif any(k in fn or k in domain for k in ["shipping", "sla", "delivery", "fulfillment"]):
+            elif any(k in fn or k in domain for k in ("shipping", "sla", "delivery", "fulfillment")):
                 lines.append(
                     f"- **{title}** (`{entry['file_name']}`) ⟷ Correlate with order timeline records: "
                     "evaluate delivery commitments, carrier transit times, and SLA thresholds against order and delivery timestamps."
                 )
-            elif any(k in fn or k in domain for k in ["spec", "technical", "hardware", "troubleshoot", "manual"]):
+            elif any(k in fn or k in domain for k in ("spec", "technical", "hardware", "troubleshoot", "manual")):
                 lines.append(
                     f"- **{title}** (`{entry['file_name']}`) ⟷ Correlate with product records: "
                     "retrieve specifications, operating parameters, troubleshooting steps, and category-specific conditions for product entities."
                 )
-            elif any(k in fn or k in domain for k in ["feedback", "review", "sentiment", "csat"]):
+            elif any(k in fn or k in domain for k in ("feedback", "review", "sentiment", "csat")):
                 lines.append(
                     f"- **{title}** (`{entry['file_name']}`) ⟷ Correlate with product and inventory log records: "
                     "cross-reference inventory movements, restocking, or defect logs with customer satisfaction feedback and reported sentiment."
@@ -230,10 +213,14 @@ When faced with complex user queries:
     return prompt.strip()
 
 
-def _get_initial_prompt() -> str:
-    """Builds the initial default system prompt dynamically from current database and vault state."""
-    return build_dynamic_system_prompt()
+_CACHED_INITIAL_PROMPT: Optional[str] = None
 
 
-# Dynamically built prompt instance for backward compatibility
-DOCUMENT_AGENT_SYSTEM_PROMPT = _get_initial_prompt()
+def __getattr__(name: str) -> Any:
+    """Lazily builds `DOCUMENT_AGENT_SYSTEM_PROMPT` on first access to avoid import-time I/O."""
+    global _CACHED_INITIAL_PROMPT
+    if name == "DOCUMENT_AGENT_SYSTEM_PROMPT":
+        if _CACHED_INITIAL_PROMPT is None:
+            _CACHED_INITIAL_PROMPT = build_dynamic_system_prompt()
+        return _CACHED_INITIAL_PROMPT
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

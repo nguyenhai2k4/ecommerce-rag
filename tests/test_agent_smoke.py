@@ -170,6 +170,25 @@ def test_chat_history_and_session_lifecycle():
     assert history_mgr.get_session(ghost_sess["id"]) is None
 
 
+def test_openinference_google_genai_token_counts_patch():
+    """Verify OpenInference handler safely processes Google GenAI usage_metadata where prompt_tokens_details is a list."""
+    from src.evaluation.phoenix_tracing import _patch_openinference_handler
+    import openinference.instrumentation.llama_index._handler as oi_handler
+
+    _patch_openinference_handler()
+    sample_google_usage = {
+        "prompt_token_count": 180,
+        "candidates_token_count": 45,
+        "total_token_count": 225,
+        "prompt_tokens_details": [{"modality": "TEXT", "token_count": 180}],
+        "candidates_tokens_details": [{"modality": "TEXT", "token_count": 45}],
+    }
+    extracted = dict(oi_handler._get_token_counts(sample_google_usage))
+    assert extracted.get("llm.token_count.prompt") == 180
+    assert extracted.get("llm.token_count.completion") == 45
+    assert extracted.get("llm.token_count.total") == 225
+
+
 if __name__ == "__main__":
     test_vault_and_database()
     test_document_loader()
@@ -177,5 +196,6 @@ if __name__ == "__main__":
     test_dynamic_prompt_and_schema()
     test_document_management_operations()
     test_chat_history_and_session_lifecycle()
+    test_openinference_google_genai_token_counts_patch()
     test_agent_initialization()
     print("All system integration tests passed successfully!")

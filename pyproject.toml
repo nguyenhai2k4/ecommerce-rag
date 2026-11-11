@@ -7,6 +7,8 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "arize-phoenix>=20.3.0",
+    "arize-phoenix-otel>=0.17.3",
     "llama-index-core>=0.14.25",
     "llama-index-embeddings-google-genai>=0.6.0",
     "llama-index-embeddings-ollama>=0.10.0",
@@ -16,9 +18,11 @@ dependencies = [
     "llama-index-llms-openai>=0.8.3",
     "llama-index-llms-openai-like>=0.8.1",
     "llama-index-readers-file>=0.7.0",
+    "openinference-instrumentation-llama-index>=4.7.2",
     "python-dotenv>=1.2.4",
     "rich>=15.0.0",
     "sqlalchemy>=2.1.6",
+    "sqlglot>=30.15.0",
     "streamlit>=1.66.1",
 ]
 

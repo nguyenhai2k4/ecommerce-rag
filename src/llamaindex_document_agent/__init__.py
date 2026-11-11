@@ -1,2 +1,6 @@
+"""Entry point package for llamaindex-document-agent CLI."""
+
+
 def main() -> None:
-    print("Hello from llamaindex-document-agent!")
+    from cli import main as cli_main
+    cli_main()

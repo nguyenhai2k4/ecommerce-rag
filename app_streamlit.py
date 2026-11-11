@@ -7,19 +7,18 @@ import streamlit as st
 
 from src.engines.model_factory import (
     check_ollama_status,
-    get_active_model_metadata,
     get_available_models_for_provider,
-    initialize_models,
 )
-from src.agent.chat_history import ChatHistoryManager, auto_generate_title
+from src.agent.chat_history import ChatHistoryManager
 from src.agent.document_agent import SpecializedDocumentAgent
-from src.engines.structured_engine import StructuredEngineManager
-from src.engines.unstructured_engine import UnstructuredEngineManager
-from src.vault.doc_loader import load_vault_documents
 from src.evaluation.eval_suite import (
     SemanticEvaluationSuite,
     SEMANTIC_BENCHMARK_CASES,
-    run_agent_benchmark,
+)
+from src.evaluation.phoenix_tracing import (
+    get_phoenix_status,
+    launch_local_phoenix_server,
+    setup_phoenix_tracing,
 )
 from src.config import config
 
@@ -499,8 +498,12 @@ with st.sidebar:
                             st.session_state.chat_manager.delete_session(sess["id"])
                             if is_active:
                                 remaining = get_user_initialized_sessions()
-                                if remaining:
-                                    nxt = st.session_state.chat_manager.get_session(remaining[0]["id"])
+                                nxt = (
+                                    st.session_state.chat_manager.get_session(remaining[0]["id"])
+                                    if remaining
+                                    else None
+                                )
+                                if nxt:
                                     st.session_state.current_session_id = nxt["id"]
                                     st.session_state.messages = nxt.get("messages", [])
                                     st.session_state.agent.load_conversation(st.session_state.messages)
@@ -872,7 +875,7 @@ elif st.session_state.active_nav == "🗄️ Knowledge Vault Explorer":
                             file_name=up_file.name,
                             content=content_bytes,
                         )
-                    st.session_state.agent.reload_vault(force_reindex=True)
+                    st.session_state.agent.reload_vault(force_reindex=False)
                     st.success(f"✅ Successfully ingested {len(uploaded_files)} document(s) and refreshed agent prompt!")
                     time.sleep(0.7)
                     st.rerun()
@@ -921,7 +924,7 @@ elif st.session_state.active_nav == "🗄️ Knowledge Vault Explorer":
                         st.caption("This will permanently remove the file from disk and re-index the knowledge vault vector store.")
                         if st.button("⚠️ Confirm Delete", key=f"confirm_delete_{selected_doc_name}", type="primary"):
                             st.session_state.agent.unstructured_manager.delete_document(selected_doc_name)
-                            st.session_state.agent.reload_vault(force_reindex=True)
+                            st.session_state.agent.reload_vault(force_reindex=False)
                             st.success(f"Deleted `{selected_doc_name}` and rebuilt knowledge vault!")
                             time.sleep(0.6)
                             st.rerun()
@@ -971,12 +974,45 @@ elif st.session_state.active_nav == "🗄️ Knowledge Vault Explorer":
 # VIEW 3: 🧪 Evaluation & Benchmark
 # =============================================================================
 elif st.session_state.active_nav == "🧪 Evaluation & Benchmark":
-    st.markdown("### 🧪 Production-Grade Semantic Search Evaluation Suite")
+    st.markdown("### 🧪 Arize Phoenix Tracing & LlamaIndex Built-in Evaluator Suite")
     st.markdown(
-        "Evaluate the agent beyond naive substring matching. Measures **Retriever Semantic Robustness** "
-        "(Hit Rate@k, MRR, Paraphrase Penalties) and **Agent Synthesis Quality** "
-        "(Embedding Cosine Similarity, Concept Coverage vs. Lexical False Negatives)."
+        "Trace every agent step via **Arize Phoenix (OpenInference / OpenTelemetry)** and evaluate output quality with "
+        "**LlamaIndex Built-in Evaluators** (`FaithfulnessEvaluator`, `RelevancyEvaluator`, `CorrectnessEvaluator`, "
+        "`SemanticSimilarityEvaluator`) alongside **Dense Retriever Robustness** (Hit Rate@k, Paraphrase Penalties)."
     )
+
+    # Arize Phoenix Status & Control Bar
+    px_status = get_phoenix_status()
+    px_col1, px_col2, px_col3 = st.columns([4, 3, 3])
+    with px_col1:
+        if px_status["server_running"]:
+            st.success(f"🟢 **Arize Phoenix Active:** `{px_status['base_url']}` (Project: `{px_status['project_name']}`)")
+        else:
+            st.info(f"⚪ **Arize Phoenix Server Offline** (`{px_status['base_url']}`)")
+    with px_col2:
+        if not px_status["server_running"]:
+            if st.button("🔭 Launch Local Arize Phoenix Server", type="primary", use_container_width=True):
+                with st.spinner("Starting local Arize Phoenix server on port 6006 and attaching LlamaIndex OpenTelemetry tracer..."):
+                    ok, msg = launch_local_phoenix_server(port=6006)
+                    if ok:
+                        st.success(f"Arize Phoenix launched at {msg}!")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        else:
+            if st.button("🔄 Re-sync OpenTelemetry Tracer", use_container_width=True):
+                setup_phoenix_tracing(force=True)
+                st.success("OpenInference LlamaIndex tracer synced!")
+                time.sleep(0.3)
+                st.rerun()
+    with px_col3:
+        st.link_button(
+            "🌐 Open Arize Phoenix UI (localhost:6006)",
+            url=px_status["base_url"],
+            use_container_width=True,
+            help="Open the Arize Phoenix observability dashboard to inspect live LLM, tool, and retriever traces.",
+        )
 
     eval_tab1, eval_tab2, eval_tab3 = st.tabs([
         "🚀 Live Dual-Stage Benchmark",
@@ -985,30 +1021,58 @@ elif st.session_state.active_nav == "🧪 Evaluation & Benchmark":
     ])
 
     with eval_tab1:
-        st.markdown("#### Execute Dual-Stage Semantic Evaluation")
-        st.caption("Runs both Retriever-level robustness testing and Agent-level semantic synthesis scoring.")
+        st.markdown("#### Execute LlamaIndex Built-in Evaluators & Retriever Benchmark")
+        st.caption(
+            "Runs Stage 1 (Dense Retriever Hit Rate & Paraphrase Penalty) and Stage 2 "
+            "(`FaithfulnessEvaluator`, `RelevancyEvaluator`, `CorrectnessEvaluator`, `SemanticSimilarityEvaluator`), "
+            "logging all traces and evaluation spans to Arize Phoenix."
+        )
+
+        eval_col_agent, eval_col_judge = st.columns(2)
+        with eval_col_agent:
+            agent_meta = getattr(st.session_state.agent, "metadata", {})
+            st.info(f"🤖 **Answer Generator Agent**: `{agent_meta.get('provider', 'unknown')}` (`{agent_meta.get('model', 'default')}`)")
+        with eval_col_judge:
+            judge_model_choice = st.selectbox(
+                "⚖️ **Evaluator (Decoupled Judge LLM)**",
+                options=["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-1.5-pro", "deepseek-chat", "Use Agent LLM"],
+                index=0,
+                help="Decoupled LLM-as-a-Judge for Faithfulness, Relevancy, and Correctness evaluation."
+            )
 
         if st.button("▶️ Run Full Semantic Benchmark", type="primary"):
-            with st.spinner("Running semantic retriever evaluations and agent synthesis across paraphrased queries..."):
-                suite = SemanticEvaluationSuite(agent=st.session_state.agent)
+            with st.spinner("Running LlamaIndex Built-in Evaluators and streaming OpenInference traces to Arize Phoenix..."):
+                j_model = judge_model_choice if judge_model_choice != "Use Agent LLM" else None
+                j_prov = "google" if j_model and "gemini" in j_model else ("deepseek" if j_model and "deepseek" in j_model else None)
+                suite = SemanticEvaluationSuite(
+                    agent=st.session_state.agent,
+                    judge_model=j_model,
+                    judge_provider=j_prov,
+                )
                 benchmark_data = suite.run_full_suite()
 
                 retriever_res = benchmark_data["retriever_benchmark"]
                 synthesis_res = benchmark_data["synthesis_benchmark"]
 
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
                 with c1:
                     canon_hit = sum(1 for r in retriever_res if r["canonical_hit"]) / len(retriever_res)
-                    st.metric("Canonical Hit Rate", f"{canon_hit*100:.1f}%")
+                    st.metric("Canonical Hit@k", f"{canon_hit*100:.0f}%")
                 with c2:
                     para_hit = sum(1 for r in retriever_res if r["paraphrase_hit"]) / len(retriever_res)
-                    st.metric("Paraphrase Hit Rate", f"{para_hit*100:.1f}%")
+                    st.metric("Paraphrase Hit@k", f"{para_hit*100:.0f}%")
                 with c3:
-                    avg_penalty = sum(r["paraphrase_penalty"] for r in retriever_res) / len(retriever_res)
-                    st.metric("Mean Paraphrase Penalty", f"{avg_penalty:+.4f}", help="Score drop when queries use slang/synonyms")
+                    faith_pass = sum(1 for r in synthesis_res if r.get("faithfulness_passing", True)) / len(synthesis_res)
+                    st.metric("Faithfulness", f"{faith_pass*100:.0f}%", help="LlamaIndex FaithfulnessEvaluator (No Hallucination)")
                 with c4:
+                    rel_pass = sum(1 for r in synthesis_res if r.get("relevancy_passing", True)) / len(synthesis_res)
+                    st.metric("Answer Relevancy", f"{rel_pass*100:.0f}%", help="LlamaIndex RelevancyEvaluator (Query + Context Alignment)")
+                with c5:
+                    avg_corr = sum(r.get("correctness_score", 4.0) for r in synthesis_res) / len(synthesis_res)
+                    st.metric("Mean Correctness", f"{avg_corr:.2f} / 5.0", help="LlamaIndex CorrectnessEvaluator (1.0 - 5.0 scale)")
+                with c6:
                     semantic_pass = sum(1 for r in synthesis_res if r["semantic_passed"]) / len(synthesis_res)
-                    st.metric("Semantic Cosine Pass", f"{semantic_pass*100:.1f}%")
+                    st.metric("Semantic Cosine", f"{semantic_pass*100:.0f}%", help="LlamaIndex SemanticSimilarityEvaluator")
 
                 st.divider()
 
@@ -1030,31 +1094,46 @@ elif st.session_state.active_nav == "🧪 Evaluation & Benchmark":
 
                 st.divider()
 
-                st.markdown("#### 2️⃣ Stage 2: Agent Synthesis (Semantic Embedding Similarity vs. Naive Lexical)")
+                st.markdown("#### 2️⃣ Stage 2: LlamaIndex Built-in Evaluators (`Faithfulness`, `Relevancy`, `Correctness`, `SemanticSimilarity`)")
                 synthesis_df = pd.DataFrame([
                     {
                         "Case ID": s["id"],
                         "Category": s["category"],
-                        "Naive Lexical Hit": f"{s['naive_score']*100:.0f}% ({'PASS' if s['naive_passed'] else 'FAIL'})",
-                        "Embedding Cosine Similarity": f"{s['cosine_score']:.3f} ({'PASS' if s['semantic_passed'] else 'FAIL'})",
-                        "Concept Coverage": f"{s['concept_coverage']*100:.0f}%",
+                        "Faithfulness": "✅ PASS" if s.get("faithfulness_passing") else "❌ FAIL",
+                        "Relevancy": "✅ PASS" if s.get("relevancy_passing") else "❌ FAIL",
+                        "Correctness (1-5)": f"{s.get('correctness_score', 0.0):.2f} / 5.0",
+                        "Embedding Cosine": f"{s['cosine_score']:.3f} ({'PASS' if s['semantic_passed'] else 'FAIL'})",
+                        "Naive Lexical": f"{s['naive_score']*100:.0f}% ({'PASS' if s['naive_passed'] else 'FAIL'})",
                         "Latency": f"{s['latency']}s",
-                        "Outcome": s["outcome"],
                     }
                     for s in synthesis_res
                 ])
                 st.dataframe(synthesis_df, use_container_width=True)
 
-                st.markdown("#### Detailed Case Inspection")
+                st.markdown("#### Detailed Case & Evaluator Inspection")
                 for s in synthesis_res:
-                    status_icon = "🟢" if s["semantic_passed"] else "🔴"
-                    with st.expander(f"{status_icon} [{s['id']}] {s['category']} | Cosine Similarity: {s['cosine_score']:.3f}"):
+                    status_icon = "🟢" if (s["semantic_passed"] and s.get("faithfulness_passing", True)) else "🔴"
+                    with st.expander(
+                        f"{status_icon} [{s['id']}] {s['category']} | "
+                        f"Faithfulness: {'PASS' if s.get('faithfulness_passing') else 'FAIL'} | "
+                        f"Correctness: {s.get('correctness_score', 0.0):.2f}/5.0 | "
+                        f"Cosine: {s['cosine_score']:.3f}"
+                    ):
                         st.markdown(f"**Query Evaluated (Paraphrased):** *\"{s['query']}\"*")
                         st.markdown(f"**Golden Reference Answer:**\n> {s['reference_answer']}")
                         st.markdown(f"**Agent Generated Response:**\n{s['response']}")
-                        st.markdown(f"**Concepts Captured:** {len(s['concepts_hit'])} propositions verified")
+                        st.markdown(
+                            f"- **FaithfulnessEvaluator:** `{s.get('faithfulness_score', 1.0)}` — {s.get('faithfulness_feedback', '')}\n"
+                            f"- **RelevancyEvaluator:** `{s.get('relevancy_score', 1.0)}` — {s.get('relevancy_feedback', '')}\n"
+                            f"- **CorrectnessEvaluator:** `{s.get('correctness_score', 4.0)}/5.0` — {s.get('correctness_feedback', '')}\n"
+                            f"- **Concepts Captured:** {len(s['concepts_hit'])} propositions verified"
+                        )
+                        if s.get("retrieved_contexts"):
+                            st.markdown("**Retrieved Context Chunks Evaluated for Groundedness:**")
+                            for c_idx, ctx_str in enumerate(s["retrieved_contexts"][:3], 1):
+                                st.code(f"[Chunk {c_idx}] {ctx_str[:500]}", language="text")
         else:
-            st.info("Click 'Run Full Semantic Benchmark' above to evaluate retriever paraphrase penalties and agent embedding similarity.")
+            st.info("Click 'Run Full Semantic Benchmark' above to execute LlamaIndex Built-in Evaluators and send traces to Arize Phoenix.")
 
     with eval_tab2:
         st.markdown("#### Canonical vs. Paraphrased Test Pairs Matrix")

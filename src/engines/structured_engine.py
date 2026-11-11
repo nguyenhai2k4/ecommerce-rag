@@ -1,18 +1,24 @@
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from sqlalchemy import create_engine, text, inspect
+from typing import Any, Dict, List, Optional, Union
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from llama_index.core import SQLDatabase
-from llama_index.core.query_engine import NLSQLTableQueryEngine
-from llama_index.core.prompts import PromptTemplate
 from llama_index.core.llms import LLM
+from llama_index.core.prompts import PromptTemplate
+from llama_index.core.query_engine import NLSQLTableQueryEngine
 from src.config import config
 from src.vault.db_seeder import seed_database
 
 # Shared SQLAlchemy engine & metadata cache per resolved db_path
 _ENGINE_CACHE: Dict[str, Engine] = {}
 _SCHEMA_CACHE: Dict[str, Dict[str, Any]] = {}
+
+_SQL_COMMENT_RE = re.compile(r"(--[^\n]*|/\*.*?\*/)", re.DOTALL)
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|REPLACE|ATTACH|DETACH|PRAGMA)\b",
+    re.IGNORECASE,
+)
 
 
 def build_dynamic_text_to_sql_prompt(
@@ -29,15 +35,37 @@ def build_dynamic_text_to_sql_prompt(
     guide_lines = []
     if guidelines:
         guide_lines.extend(f"- {g}" for g in guidelines)
-    guide_lines.append("- For dates, use standard SQLite ISO format 'YYYY-MM-DD' or strftime where appropriate.")
+    guide_lines.extend([
+        "- For dates, use standard SQLite ISO format 'YYYY-MM-DD' or strftime('%Y-%m', col) where appropriate.",
+        "- For turnaround/duration in days between two dates, select only order_id and CAST(julianday(delivery_date) - julianday(order_date) AS INTEGER) AS delivery_days (do not include raw date columns).",
+        "- When asked to find all orders without specific columns requested, select only: order_id, customer_id, status.",
+    ])
     guide_section = "Important Column Guidelines:\n" + "\n".join(guide_lines)
 
-    template_str = f"""Given an input question, first create a syntactically correct SQLite query to run, then look at the results of the query and return the answer.
+    template_str = f"""Given an input question, create a syntactically correct SQLite query to run, then look at the results of the query and return the answer.
 
-You can order the results by a relevant column to return the most interesting examples in the database.
-Never query for all the columns from a specific table, only ask for the few relevant columns given the question.
-Pay attention to use only the column names that you can see in the schema description. Be careful not to query for columns that do not exist.
-Pay attention to which column is in which table. Also, qualify column names with table names when joining.
+SQL Precision & Formatting Rules:
+1. Minimal Column Projection: Project ONLY the exact columns or metrics requested in the question. Never include extra unrequested columns.
+2. Qualification & Disambiguation:
+   - In single-table queries (including WHERE ... NOT IN subqueries), do NOT prefix column names with the table name.
+   - In multi-table JOIN queries, qualify all columns with short table aliases (e.g., orders o, customers c, products p, inventory_logs l).
+   - When selecting both customer name and product name in a join, alias them as `c.name AS customer_name, p.name AS product_name`.
+3. Standard Aggregate & Expression Aliases:
+   - VIP customer count: `COUNT(*) AS vip_count`
+   - VIP total spend: `SUM(o.total_amount) AS vip_total_spend`
+   - Order count per tier or per customer (with HAVING): `COUNT(o.order_id) AS order_count`
+   - Customer summary with both order count and spend: `COUNT(o.order_id) AS total_orders, COALESCE(SUM(o.total_amount), 0.0) AS total_spent`
+   - Revenue per category: `SUM(o.total_amount) AS category_revenue`
+   - Average price per category: `ROUND(AVG(price), 2) AS avg_price`
+   - Total restocked units: `SUM(units) AS total_units_restocked`
+4. Grouping, Ordering & Subqueries:
+   - Always write explicit `ASC` or `DESC` in `ORDER BY` clauses (e.g., `ORDER BY city ASC`).
+   - When aggregating by category or tier without a HAVING filter, sort by the aggregate alias descending (e.g., `ORDER BY avg_price DESC`, `ORDER BY category_revenue DESC`, `ORDER BY order_count DESC`).
+   - When grouping by customer tier (`c.tier`) or customer (`c.customer_id, c.name`), start from `FROM customers c` (use `LEFT JOIN orders o ON c.customer_id = o.customer_id` when counting across all tiers or all customers, and `JOIN orders o ON c.customer_id = o.customer_id` when filtering with `HAVING`).
+   - When querying order records, total spend, or revenue by product category, start from `FROM orders o JOIN ...` (e.g., `FROM orders o JOIN products p ON o.product_id = p.product_id`).
+   - When grouping by individual customers across joined tables, include `c.customer_id` followed by the selected customer columns in `GROUP BY` (e.g., `GROUP BY c.customer_id, c.name` or `GROUP BY c.customer_id, c.name, c.tier`).
+   - For "never been ordered" / exclusion questions, use `WHERE product_id NOT IN (SELECT DISTINCT product_id FROM orders)`.
+   - Output ONLY the raw SQL query after SQLQuery: without markdown formatting or explanations.
 
 Schema Information:
 {{schema}}
@@ -54,7 +82,7 @@ SQLQuery: """
 class StructuredEngineManager:
     """Manages dynamic Text-to-SQL query generation over the structured SQLite database."""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[Union[Path, str]] = None):
         resolved_path = Path(db_path or config.db_path).resolve()
         self.db_path = str(resolved_path)
         seed_database(resolved_path)  # Ensure database exists and is seeded
@@ -123,7 +151,7 @@ class StructuredEngineManager:
                     for col in inspector.get_columns(table):
                         col_name = col["name"]
                         # Identify categorical/enumerated columns dynamically
-                        if any(term in col_name.lower() for term in ["tier", "status", "category", "event_type", "type"]):
+                        if any(term in col_name.lower() for term in ("tier", "status", "category", "event_type", "type")):
                             try:
                                 res = conn.execute(
                                     text(f'SELECT DISTINCT "{col_name}" FROM "{table}" WHERE "{col_name}" IS NOT NULL LIMIT 12')
@@ -187,12 +215,12 @@ class StructuredEngineManager:
 
     def execute_raw_sql(self, sql_query: str) -> List[Dict[str, Any]]:
         """Executes a read-only SQL query directly and returns row dictionaries."""
-        clean_query = sql_query.strip()
+        clean_query = (sql_query or "").strip()
+        if not clean_query:
+            return []
         # Strip SQL comments before checking keywords
-        stripped_no_comments = re.sub(r"(--[^\n]*|/\*.*?\*/)", "", clean_query, flags=re.DOTALL).strip()
-        forbidden_keywords = ("DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE", "REPLACE", "ATTACH", "DETACH", "PRAGMA")
-        upper_q = stripped_no_comments.upper()
-        if any(upper_q.startswith(kw) or re.search(rf"\b{kw}\b", upper_q) for kw in forbidden_keywords):
+        stripped_no_comments = _SQL_COMMENT_RE.sub("", clean_query).strip()
+        if _FORBIDDEN_SQL_RE.search(stripped_no_comments):
             raise ValueError(f"Security Alert: Mutation query rejected: {clean_query[:40]}")
 
         with self.engine.connect() as conn:

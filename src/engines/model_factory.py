@@ -1,17 +1,16 @@
+import hashlib
+import json
+import math
 import os
 import re
-import math
-import json
 import time
-import hashlib
 import urllib.request
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 from llama_index.core import Settings
-from llama_index.core.llms import LLM
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.bridge.pydantic import PrivateAttr
+from llama_index.core.llms import LLM
 from llama_index.core.llms.mock import MockLLM
-from llama_index.core.embeddings import MockEmbedding
 from src.config import config
 
 
@@ -33,6 +32,12 @@ _OLLAMA_CACHE_TTL_SECONDS = 10.0
 # Instance caches to avoid redundant network handshakes (e.g., GET /v1beta/models/...)
 _LLM_CACHE: Dict[Tuple[Any, ...], Tuple[LLM, Dict[str, Any]]] = {}
 _EMBED_CACHE: Dict[Tuple[Any, ...], BaseEmbedding] = {}
+
+# Bounded in-memory embedding vector cache: {(model_key, text): vector}
+_EMBED_VECTOR_CACHE: Dict[Tuple[str, str], List[float]] = {}
+_MAX_EMBED_VECTOR_CACHE_SIZE = 2048
+
+_CLEAN_TOKEN_RE = re.compile(r"[^a-z0-9#]+")
 
 
 def mark_gemini_quota_exhausted(exhausted: bool = True) -> None:
@@ -75,12 +80,16 @@ def _compute_local_semantic_vector(text: str, dim: int = 3072) -> List[float]:
     combining word stems, synonym canonicalization, and character n-grams.
     Used when cloud embedding APIs are offline or rate-limited (429).
     """
+    cache_key = ("__local_hashed__", f"{dim}:{text}")
+    if cache_key in _EMBED_VECTOR_CACHE:
+        return _EMBED_VECTOR_CACHE[cache_key]
+
     vec = [0.0] * dim
     if not text:
         vec[0] = 1.0
         return vec
 
-    clean = re.sub(r"[^a-z0-9#]+", " ", text.lower()).strip()
+    clean = _CLEAN_TOKEN_RE.sub(" ", text.lower()).strip()
     raw_tokens = [t for t in clean.split() if len(t) > 1]
     expanded_tokens: List[str] = []
     for tok in raw_tokens:
@@ -107,13 +116,17 @@ def _compute_local_semantic_vector(text: str, dim: int = 3072) -> List[float]:
         vec = [v / norm for v in vec]
     else:
         vec[0] = 1.0
+
+    if len(_EMBED_VECTOR_CACHE) < _MAX_EMBED_VECTOR_CACHE_SIZE:
+        _EMBED_VECTOR_CACHE[cache_key] = vec
     return vec
 
 
 class ResilientEmbedding(BaseEmbedding):
     """
-    Embedding wrapper that delegates to a primary cloud/local embedding model
-    and transparently falls back to deterministic local semantic vectors on 429/network errors.
+    Embedding wrapper that delegates to a primary cloud/local embedding model,
+    caches computed vectors in memory, and transparently falls back to deterministic
+    local semantic vectors on 429/network errors.
     """
     embed_dim: int = 3072
     is_fallback: bool = False
@@ -133,10 +146,22 @@ class ResilientEmbedding(BaseEmbedding):
         )
         self._primary = primary
 
+    def _cache_key(self, text: str) -> Tuple[str, str]:
+        return (self.model_name, text)
+
+    def _store_cache(self, text: str, vec: List[float]) -> List[float]:
+        if len(_EMBED_VECTOR_CACHE) >= _MAX_EMBED_VECTOR_CACHE_SIZE:
+            _EMBED_VECTOR_CACHE.clear()
+        _EMBED_VECTOR_CACHE[self._cache_key(text)] = vec
+        return vec
+
     def _get_query_embedding(self, query: str) -> List[float]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            ck = self._cache_key(query)
+            if ck in _EMBED_VECTOR_CACHE:
+                return _EMBED_VECTOR_CACHE[ck]
             try:
-                return self._primary._get_query_embedding(query)
+                return self._store_cache(query, self._primary._get_query_embedding(query))
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -145,8 +170,11 @@ class ResilientEmbedding(BaseEmbedding):
 
     async def _aget_query_embedding(self, query: str) -> List[float]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            ck = self._cache_key(query)
+            if ck in _EMBED_VECTOR_CACHE:
+                return _EMBED_VECTOR_CACHE[ck]
             try:
-                return await self._primary._aget_query_embedding(query)
+                return self._store_cache(query, await self._primary._aget_query_embedding(query))
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -155,8 +183,11 @@ class ResilientEmbedding(BaseEmbedding):
 
     def _get_text_embedding(self, text: str) -> List[float]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            ck = self._cache_key(text)
+            if ck in _EMBED_VECTOR_CACHE:
+                return _EMBED_VECTOR_CACHE[ck]
             try:
-                return self._primary._get_text_embedding(text)
+                return self._store_cache(text, self._primary._get_text_embedding(text))
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -165,8 +196,11 @@ class ResilientEmbedding(BaseEmbedding):
 
     async def _aget_text_embedding(self, text: str) -> List[float]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            ck = self._cache_key(text)
+            if ck in _EMBED_VECTOR_CACHE:
+                return _EMBED_VECTOR_CACHE[ck]
             try:
-                return await self._primary._aget_text_embedding(text)
+                return self._store_cache(text, await self._primary._aget_text_embedding(text))
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -175,8 +209,15 @@ class ResilientEmbedding(BaseEmbedding):
 
     def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            missing_indices = [i for i, t in enumerate(texts) if self._cache_key(t) not in _EMBED_VECTOR_CACHE]
+            if not missing_indices:
+                return [_EMBED_VECTOR_CACHE[self._cache_key(t)] for t in texts]
             try:
-                return self._primary._get_text_embeddings(texts)
+                missing_texts = [texts[i] for i in missing_indices]
+                computed = self._primary._get_text_embeddings(missing_texts)
+                for t, vec in zip(missing_texts, computed):
+                    self._store_cache(t, vec)
+                return [_EMBED_VECTOR_CACHE[self._cache_key(t)] for t in texts]
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -185,8 +226,15 @@ class ResilientEmbedding(BaseEmbedding):
 
     async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
         if self._primary is not None and not self.is_fallback and not _GEMINI_QUOTA_EXHAUSTED:
+            missing_indices = [i for i, t in enumerate(texts) if self._cache_key(t) not in _EMBED_VECTOR_CACHE]
+            if not missing_indices:
+                return [_EMBED_VECTOR_CACHE[self._cache_key(t)] for t in texts]
             try:
-                return await self._primary._aget_text_embeddings(texts)
+                missing_texts = [texts[i] for i in missing_indices]
+                computed = await self._primary._aget_text_embeddings(missing_texts)
+                for t, vec in zip(missing_texts, computed):
+                    self._store_cache(t, vec)
+                return [_EMBED_VECTOR_CACHE[self._cache_key(t)] for t in texts]
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     mark_gemini_quota_exhausted(True)
@@ -237,6 +285,7 @@ def get_available_models_for_provider(provider: str, base_url: Optional[str] = N
         base_models = [
             "gemini-2.5-flash-lite",
             "gemini-2.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-1.5-pro",
             "gemini-2.0-flash-exp",
         ]
@@ -336,13 +385,8 @@ def _resolve_embedding_model(
     """
     clean_gemini_key = (gemini_key or "").strip()
     has_gemini_key = bool(clean_gemini_key and clean_gemini_key != "your_gemini_api_key_here")
-    use_gemini_embed = (
-        has_gemini_key
-        and not _GEMINI_QUOTA_EXHAUSTED
-        and preferred_provider in ("google", "gemini")
-    )
+    use_gemini_embed = has_gemini_key and not _GEMINI_QUOTA_EXHAUSTED
     embed_cache_key = (
-        preferred_provider,
         use_gemini_embed,
         clean_gemini_key if use_gemini_embed else "",
         ollama_base_url,
@@ -400,7 +444,11 @@ def initialize_models(
     )
 
     ollama_url = base_url or config.ollama_base_url or "http://localhost:11434"
-    gemini_key = api_key if api_key is not None else (config.gemini_api_key or os.getenv("GEMINI_API_KEY", ""))
+    gemini_key = (
+        api_key
+        if (api_key is not None and selected_provider in ("google", "gemini"))
+        else (config.gemini_api_key or os.getenv("GEMINI_API_KEY", ""))
+    )
     deepseek_key = (
         api_key
         if (api_key is not None and selected_provider == "deepseek")

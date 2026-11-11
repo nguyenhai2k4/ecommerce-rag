@@ -1,23 +1,40 @@
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 from llama_index.core import (
-    VectorStoreIndex,
-    SummaryIndex,
-    StorageContext,
-    load_index_from_storage,
     Settings,
+    StorageContext,
+    SummaryIndex,
+    VectorStoreIndex,
+    load_index_from_storage,
 )
-from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.node_parser import SentenceSplitter
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.retrievers import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle
 from src.config import config
-from src.vault.doc_loader import load_vault_documents, _compute_dir_signature
-from src.engines.model_factory import initialize_models, is_gemini_quota_exhausted, _SYNONYM_CANONICAL_MAP
+from src.engines.model_factory import (
+    _SYNONYM_CANONICAL_MAP,
+    initialize_models,
+    is_gemini_quota_exhausted,
+)
+from src.vault.doc_loader import (
+    _compute_dir_signature,
+    evict_vault_document_cache,
+    load_single_vault_document,
+    load_vault_documents,
+)
 
 # In-memory cache of loaded indices: {storage_dir_str: (dir_sig, VectorStoreIndex, SummaryIndex)}
 _INDEX_MEM_CACHE: Dict[str, Tuple[Tuple[Tuple[str, int, int], ...], VectorStoreIndex, SummaryIndex]] = {}
+
+_TOKEN_CLEAN_RE = re.compile(r"[^a-z0-9#]+")
+_STOP_WORDS = frozenset({
+    "what", "is", "the", "for", "a", "an", "to", "in", "of", "and", "or",
+    "on", "can", "how", "do", "does", "are", "with", "from", "by", "that",
+    "this", "they", "their", "my", "she", "he", "it", "be", "if", "have",
+    "has", "had", "was", "were", "according", "compared", "about", "when",
+})
 
 
 class _ResilientVaultRetriever(BaseRetriever):
@@ -116,7 +133,7 @@ class UnstructuredEngineManager:
             return False
 
         target_path.unlink()
-        load_vault_documents(force_reload=True)
+        evict_vault_document_cache(file_name)
 
         # Incrementally remove matching nodes to avoid re-embedding remaining documents
         if self.vector_index is not None and self.summary_index is not None:
@@ -153,8 +170,8 @@ class UnstructuredEngineManager:
         is_overwrite = target_path.exists()
         target_path.write_bytes(content)
 
-        all_docs = load_vault_documents(force_reload=True)
-        new_docs = [d for d in all_docs if d.metadata.get("file_name") == file_name]
+        # Parse only the newly added/updated file rather than re-reading the entire vault
+        new_docs = load_single_vault_document(target_path)
 
         if self.vector_index is not None and self.summary_index is not None and new_docs:
             try:
@@ -191,15 +208,18 @@ class UnstructuredEngineManager:
         files = []
         for ext in ("*.md", "*.txt", "*.pdf"):
             for p in config.unstructured_dir.glob(ext):
-                stat = p.stat()
-                files.append({
-                    "name": p.name,
-                    "extension": p.suffix.lower(),
-                    "size_bytes": stat.st_size,
-                    "size_kb": round(stat.st_size / 1024, 2),
-                    "modified_time": stat.st_mtime,
-                    "path": p,
-                })
+                try:
+                    stat = p.stat()
+                    files.append({
+                        "name": p.name,
+                        "extension": p.suffix.lower(),
+                        "size_bytes": stat.st_size,
+                        "size_kb": round(stat.st_size / 1024, 2),
+                        "modified_time": stat.st_mtime,
+                        "path": p,
+                    })
+                except OSError:
+                    continue
         return sorted(files, key=lambda x: x["name"])
 
     def get_vector_query_engine(self, similarity_top_k: int = 3, llm=None):
@@ -246,14 +266,8 @@ class UnstructuredEngineManager:
         if not all_nodes:
             return []
 
-        stop_words = {
-            "what", "is", "the", "for", "a", "an", "to", "in", "of", "and", "or",
-            "on", "can", "how", "do", "does", "are", "with", "from", "by", "that",
-            "this", "they", "their", "my", "she", "he", "it", "be", "if", "have",
-            "has", "had", "was", "were", "according", "compared", "about", "when",
-        }
-        clean_q = re.sub(r"[^a-z0-9#]+", " ", query_str.lower()).strip()
-        q_tokens = [t for t in clean_q.split() if len(t) > 1 and t not in stop_words]
+        clean_q = _TOKEN_CLEAN_RE.sub(" ", query_str.lower()).strip()
+        q_tokens = [t for t in clean_q.split() if len(t) > 1 and t not in _STOP_WORDS]
         expanded_q: List[str] = list(q_tokens)
         for t in q_tokens:
             if t.endswith("s") and len(t) > 3:
@@ -262,6 +276,7 @@ class UnstructuredEngineManager:
                 expanded_q.extend(_SYNONYM_CANONICAL_MAP[t].split())
 
         scored: List[NodeWithScore] = []
+        denom = max(len(expanded_q), 1)
         for node in all_nodes:
             text_lower = node.text.lower()
             title_lower = str(node.metadata.get("title", "")).lower()
@@ -270,9 +285,12 @@ class UnstructuredEngineManager:
 
             direct_hits = sum(1 for t in q_tokens if t in combined)
             expanded_hits = sum(1 for t in expanded_q if t in combined)
-            denom = max(len(expanded_q), 1)
             raw_ratio = (direct_hits * 1.3 + expanded_hits * 0.7) / (denom * 1.5)
-            calibrated_score = min(0.94, round(0.62 + 0.32 * min(raw_ratio, 1.0), 4)) if (direct_hits + expanded_hits) > 0 else 0.45
+            calibrated_score = (
+                min(0.94, round(0.62 + 0.32 * min(raw_ratio, 1.0), 4))
+                if (direct_hits + expanded_hits) > 0
+                else 0.45
+            )
             scored.append(NodeWithScore(node=node, score=calibrated_score))
 
         scored.sort(key=lambda x: float(x.score or 0.0), reverse=True)
@@ -311,6 +329,7 @@ class UnstructuredEngineManager:
         hit = False
         rank = None
         max_score = 0.0
+        kw_lower = target_doc_keyword.lower()
 
         for idx, node in enumerate(nodes):
             file_name = node.node.metadata.get("file_name", "")
@@ -319,9 +338,11 @@ class UnstructuredEngineManager:
             if score > max_score:
                 max_score = score
 
-            if (target_doc_keyword.lower() in file_name.lower() or 
-                target_doc_keyword.lower() in title.lower() or
-                target_doc_keyword.lower() in node.node.text.lower()):
+            if (
+                kw_lower in file_name.lower()
+                or kw_lower in title.lower()
+                or kw_lower in node.node.text.lower()
+            ):
                 if not hit:
                     hit = True
                     rank = idx + 1
